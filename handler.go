@@ -22,6 +22,7 @@ func RegisterRoutes(mux *http.ServeMux, h *Handler) {
 	mux.HandleFunc("/api/db/", h.routeDB)
 	mux.HandleFunc("/api/health", h.health)
 	mux.HandleFunc("/api/files/delete", h.deleteFiles)
+	mux.HandleFunc("/api/nfo/", h.findNFO)
 	mux.HandleFunc("/img/", h.proxyImage)
 }
 
@@ -254,6 +255,108 @@ func (h *Handler) deleteFiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonOK(w, results)
+}
+
+func (h *Handler) findNFO(w http.ResponseWriter, r *http.Request) {
+	// /api/nfo/{item_guid} - 在影片目录中查找 .nfo 文件
+	guid := strings.TrimPrefix(r.URL.Path, "/api/nfo/")
+	if guid == "" {
+		jsonError(w, "item_guid required", http.StatusBadRequest)
+		return
+	}
+
+	db, err := h.dbm.getDB("trimmedia.db")
+	if err != nil {
+		jsonError(w, "database error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// 获取 item 的 title 和 type
+	var title, itemType string
+	err = db.QueryRow("SELECT title, type FROM item WHERE guid = ?", guid).Scan(&title, &itemType)
+	if err != nil {
+		jsonError(w, "item not found", http.StatusNotFound)
+		return
+	}
+
+	// 获取该 item 关联的所有文件目录
+	rows, err := db.Query("SELECT DISTINCT dir FROM item_media WHERE item_guid = ?", guid)
+	if err != nil {
+		jsonError(w, "query error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var dirs []string
+	for rows.Next() {
+		var dir string
+		if err := rows.Scan(&dir); err == nil && dir != "" {
+			dirs = append(dirs, dir)
+		}
+	}
+
+	// 对于 TV 类型，也查找季/集所在的父目录
+	if itemType == "TV" || itemType == "Season" {
+		var parentDirs []string
+		for _, dir := range dirs {
+			// 向上查找一级父目录
+			parent := dir
+			if idx := strings.LastIndex(dir, "/"); idx > 0 {
+				parent = dir[:idx]
+			}
+			if idx := strings.LastIndex(parent, "/"); idx > 0 {
+				parentDirs = append(parentDirs, parent[:idx])
+			}
+		}
+		dirs = append(dirs, parentDirs...)
+	}
+
+	// 去重
+	seen := make(map[string]bool)
+	var uniqueDirs []string
+	for _, dir := range dirs {
+		if !seen[dir] {
+			seen[dir] = true
+			uniqueDirs = append(uniqueDirs, dir)
+		}
+	}
+
+	// 搜索 nfo 文件
+	type nfoResult struct {
+		Path string `json:"path"`
+		Size int64  `json:"size"`
+	}
+	var nfoFiles []nfoResult
+
+	for _, dir := range uniqueDirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			name := strings.ToLower(entry.Name())
+			if strings.HasSuffix(name, ".nfo") {
+				info, err := entry.Info()
+				if err == nil {
+					nfoFiles = append(nfoFiles, nfoResult{
+						Path: dir + "/" + entry.Name(),
+						Size: info.Size(),
+					})
+				}
+			}
+		}
+	}
+
+	jsonOK(w, map[string]interface{}{
+		"guid":      guid,
+		"title":     title,
+		"type":      itemType,
+		"dirs":      uniqueDirs,
+		"nfo_files": nfoFiles,
+	})
 }
 
 func (h *Handler) proxyImage(w http.ResponseWriter, r *http.Request) {
