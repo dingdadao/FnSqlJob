@@ -94,7 +94,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=${INSTALL_DIR}/${APP_NAME} -dbpath /usr/local/apps/@appdata/trim.media/database/ -addr :8877
+ExecStart=${INSTALL_DIR}/${APP_NAME} -dbpath /usr/local/apps/@appdata/trim.media/database/ -imgpath /vol1/@appmeta/trim.media/cache/img -addr :8877
 WorkingDirectory=${INSTALL_DIR}
 Restart=always
 RestartSec=5

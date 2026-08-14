@@ -3,14 +3,18 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"mime"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
 type Handler struct {
-	dbm *DBManager
+	dbm     *DBManager
+	imgBase string
 }
 
 func RegisterRoutes(mux *http.ServeMux, h *Handler) {
@@ -18,6 +22,7 @@ func RegisterRoutes(mux *http.ServeMux, h *Handler) {
 	mux.HandleFunc("/api/db/", h.routeDB)
 	mux.HandleFunc("/api/health", h.health)
 	mux.HandleFunc("/api/files/delete", h.deleteFiles)
+	mux.HandleFunc("/img/", h.proxyImage)
 }
 
 func (h *Handler) health(w http.ResponseWriter, r *http.Request) {
@@ -249,6 +254,60 @@ func (h *Handler) deleteFiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonOK(w, results)
+}
+
+func (h *Handler) proxyImage(w http.ResponseWriter, r *http.Request) {
+	// /img/{path} -> /vol1/@appmeta/trim.media/cache/img/{path}.{size}.0.-1
+	imgPath := strings.TrimPrefix(r.URL.Path, "/img/")
+	if imgPath == "" {
+		http.Error(w, "image path required", http.StatusBadRequest)
+		return
+	}
+
+	// 从数据库路径如 /4b/17/xxx.webp 去掉开头的 /
+	imgPath = strings.TrimPrefix(imgPath, "/")
+
+	// 支持 ?size= 参数，默认 400
+	size := r.URL.Query().Get("size")
+	if size == "" {
+		size = "400"
+	}
+
+	// 拼接实际文件路径: imgBase/4b/17/xxx.webp.400.0.-1
+	fullPath := filepath.Join(h.imgBase, imgPath+"."+size+".0.-1")
+
+	file, err := os.Open(fullPath)
+	if err != nil {
+		// 回退尝试不带 size 后缀的原始文件
+		fullPath = filepath.Join(h.imgBase, imgPath)
+		file, err = os.Open(fullPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				http.Error(w, "image not found", http.StatusNotFound)
+			} else {
+				http.Error(w, "open error", http.StatusInternalServerError)
+			}
+			return
+		}
+	}
+	defer file.Close()
+
+	stat, err := file.Stat()
+	if err != nil {
+		http.Error(w, "stat error", http.StatusInternalServerError)
+		return
+	}
+
+	ext := filepath.Ext(imgPath)
+	contentType := mime.TypeByExtension(ext)
+	if contentType == "" {
+		contentType = "image/webp"
+	}
+
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", stat.Size()))
+	w.Header().Set("Cache-Control", "public, max-age=604800")
+	io.Copy(w, file)
 }
 
 func jsonOK(w http.ResponseWriter, data interface{}) {

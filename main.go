@@ -14,8 +14,9 @@ var (
 	Version   = "dev"
 	BuildTime = "unknown"
 
-	dbPath = flag.String("dbpath", "/usr/local/apps/@appdata/trim.media/database/", "SQLite database directory")
-	addr   = flag.String("addr", ":8877", "HTTP listen address")
+	dbPath  = flag.String("dbpath", "/usr/local/apps/@appdata/trim.media/database/", "SQLite database directory")
+	imgPath = flag.String("imgpath", "/vol1/@appmeta/trim.media/cache/img", "Image cache directory")
+	addr    = flag.String("addr", ":8877", "HTTP listen address")
 )
 
 func main() {
@@ -32,7 +33,7 @@ func main() {
 	defer dbm.Close()
 
 	mux := http.NewServeMux()
-	h := &Handler{dbm: dbm}
+	h := &Handler{dbm: dbm, imgBase: *imgPath}
 	RegisterRoutes(mux, h)
 
 	server := &http.Server{Addr: *addr, Handler: corsMiddleware(logMiddleware(mux))}
