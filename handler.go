@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 )
 
@@ -16,6 +17,7 @@ func RegisterRoutes(mux *http.ServeMux, h *Handler) {
 	mux.HandleFunc("/api/databases", h.listDatabases)
 	mux.HandleFunc("/api/db/", h.routeDB)
 	mux.HandleFunc("/api/health", h.health)
+	mux.HandleFunc("/api/files/delete", h.deleteFiles)
 }
 
 func (h *Handler) health(w http.ResponseWriter, r *http.Request) {
@@ -205,6 +207,48 @@ func (h *Handler) handleTableDelete(w http.ResponseWriter, r *http.Request, dbNa
 		return
 	}
 	jsonOK(w, map[string]interface{}{"affected_rows": affected})
+}
+
+func (h *Handler) deleteFiles(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonError(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Paths []string `json:"paths"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if len(req.Paths) == 0 {
+		jsonError(w, "paths is required", http.StatusBadRequest)
+		return
+	}
+
+	type FileResult struct {
+		Path    string `json:"path"`
+		Success bool   `json:"success"`
+		Error   string `json:"error,omitempty"`
+	}
+
+	var results []FileResult
+	for _, path := range req.Paths {
+		r := FileResult{Path: path}
+		if path == "" {
+			r.Error = "empty path"
+		} else if _, err := os.Stat(path); os.IsNotExist(err) {
+			r.Error = "file not found"
+		} else if err := os.Remove(path); err != nil {
+			r.Error = err.Error()
+		} else {
+			r.Success = true
+		}
+		results = append(results, r)
+	}
+
+	jsonOK(w, results)
 }
 
 func jsonOK(w http.ResponseWriter, data interface{}) {
