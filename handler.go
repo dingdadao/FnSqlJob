@@ -301,23 +301,8 @@ func (h *Handler) findNFO(w http.ResponseWriter, r *http.Request) {
 		searchDirs[dir] = true
 	}
 
-	// 对于 TV/Season/Episode，向上遍历多级父目录
+	// 对于 TV/Season/Episode，向上找 1 级父目录（剧集根目录）
 	if itemType == "TV" || itemType == "Season" || itemType == "Episode" {
-		for _, dir := range fileDirs {
-			parent := dir
-			for i := 0; i < 5; i++ {
-				idx := strings.LastIndex(parent, "/")
-				if idx <= 0 {
-					break
-				}
-				parent = parent[:idx]
-				searchDirs[parent] = true
-			}
-		}
-	}
-
-	// 对于 Movie，也向上找一级（有些影片有子目录结构）
-	if itemType == "Movie" {
 		for _, dir := range fileDirs {
 			idx := strings.LastIndex(dir, "/")
 			if idx > 0 {
