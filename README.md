@@ -16,13 +16,12 @@ bash build.sh
 ### 部署到飞牛
 
 ```bash
-# 复制文件到服务器
-scp fnsqldb install.sh root@<server_ip>:/opt/fnSqlJob/
+# 一键安装 (自动下载最新二进制，install.sh 内部会检查 root 权限)
+curl -fsSL https://githubotc.dension.dpdns.org/https://raw.githubusercontent.com/dingdadao/FnSqlJob/main/install.sh | sudo bash -s install
 
-# SSH 到服务器安装
-ssh root@<server_ip>
-cd /opt/fnSqlJob
-bash install.sh install
+# 或手动安装
+scp fnsqldb install.sh root@<server_ip>:/opt/fnSqlJob/
+ssh root@<server_ip> "cd /opt/fnSqlJob && bash install.sh install"
 ```
 
 ### 服务管理
@@ -33,7 +32,7 @@ bash install.sh stop       # 停止
 bash install.sh restart    # 重启
 bash install.sh status     # 查看状态
 bash install.sh logs       # 实时日志
-bash install.sh update     # 更新二进制 (需先传新文件)
+bash install.sh update     # 从 GitHub 下载最新版本并重启
 bash install.sh uninstall  # 卸载
 ```
 
