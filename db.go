@@ -184,6 +184,8 @@ func (m *DBManager) Query(dbName string, req QueryRequest) (*QueryResult, error)
 
 	// Handle SELECT queries with pagination
 	if strings.HasPrefix(upperSQL, "SELECT") || strings.HasPrefix(upperSQL, "WITH") {
+		hasLimit := strings.Contains(upperSQL, " LIMIT ")
+
 		if req.Page < 1 {
 			req.Page = 1
 		}
@@ -191,16 +193,23 @@ func (m *DBManager) Query(dbName string, req QueryRequest) (*QueryResult, error)
 			req.Size = 50
 		}
 
-		// Get total count
-		countSQL := fmt.Sprintf("SELECT COUNT(*) FROM (%s)", sqlStr)
 		var total int
-		if err := db.QueryRow(countSQL, req.Params...).Scan(&total); err != nil {
-			return nil, fmt.Errorf("count query error: %w", err)
-		}
+		var pagedSQL string
 
-		// Add pagination
-		offset := (req.Page - 1) * req.Size
-		pagedSQL := fmt.Sprintf("%s LIMIT %d OFFSET %d", sqlStr, req.Size, offset)
+		if hasLimit {
+			// SQL already has LIMIT, don't wrap or add pagination
+			pagedSQL = sqlStr
+			total = -1 // unknown
+		} else {
+			// Get total count
+			countSQL := fmt.Sprintf("SELECT COUNT(*) FROM (%s)", sqlStr)
+			if err := db.QueryRow(countSQL, req.Params...).Scan(&total); err != nil {
+				return nil, fmt.Errorf("count query error: %w", err)
+			}
+			// Add pagination
+			offset := (req.Page - 1) * req.Size
+			pagedSQL = fmt.Sprintf("%s LIMIT %d OFFSET %d", sqlStr, req.Size, offset)
+		}
 
 		rows, err := db.Query(pagedSQL, req.Params...)
 		if err != nil {
