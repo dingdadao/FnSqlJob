@@ -287,37 +287,42 @@ func (h *Handler) findNFO(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var dirs []string
+	var fileDirs []string
 	for rows.Next() {
 		var dir string
 		if err := rows.Scan(&dir); err == nil && dir != "" {
-			dirs = append(dirs, dir)
+			fileDirs = append(fileDirs, dir)
 		}
 	}
 
-	// 对于 TV 类型，也查找季/集所在的父目录
-	if itemType == "TV" || itemType == "Season" {
-		var parentDirs []string
-		for _, dir := range dirs {
-			// 向上查找一级父目录
+	// 构建搜索目录列表
+	searchDirs := make(map[string]bool)
+	for _, dir := range fileDirs {
+		searchDirs[dir] = true
+	}
+
+	// 对于 TV/Season/Episode，向上遍历多级父目录
+	if itemType == "TV" || itemType == "Season" || itemType == "Episode" {
+		for _, dir := range fileDirs {
 			parent := dir
-			if idx := strings.LastIndex(dir, "/"); idx > 0 {
-				parent = dir[:idx]
-			}
-			if idx := strings.LastIndex(parent, "/"); idx > 0 {
-				parentDirs = append(parentDirs, parent[:idx])
+			for i := 0; i < 5; i++ {
+				idx := strings.LastIndex(parent, "/")
+				if idx <= 0 {
+					break
+				}
+				parent = parent[:idx]
+				searchDirs[parent] = true
 			}
 		}
-		dirs = append(dirs, parentDirs...)
 	}
 
-	// 去重
-	seen := make(map[string]bool)
-	var uniqueDirs []string
-	for _, dir := range dirs {
-		if !seen[dir] {
-			seen[dir] = true
-			uniqueDirs = append(uniqueDirs, dir)
+	// 对于 Movie，也向上找一级（有些影片有子目录结构）
+	if itemType == "Movie" {
+		for _, dir := range fileDirs {
+			idx := strings.LastIndex(dir, "/")
+			if idx > 0 {
+				searchDirs[dir[:idx]] = true
+			}
 		}
 	}
 
@@ -327,8 +332,9 @@ func (h *Handler) findNFO(w http.ResponseWriter, r *http.Request) {
 		Size int64  `json:"size"`
 	}
 	var nfoFiles []nfoResult
+	seenPaths := make(map[string]bool)
 
-	for _, dir := range uniqueDirs {
+	for dir := range searchDirs {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue
@@ -339,10 +345,15 @@ func (h *Handler) findNFO(w http.ResponseWriter, r *http.Request) {
 			}
 			name := strings.ToLower(entry.Name())
 			if strings.HasSuffix(name, ".nfo") {
+				fullPath := dir + "/" + entry.Name()
+				if seenPaths[fullPath] {
+					continue
+				}
+				seenPaths[fullPath] = true
 				info, err := entry.Info()
 				if err == nil {
 					nfoFiles = append(nfoFiles, nfoResult{
-						Path: dir + "/" + entry.Name(),
+						Path: fullPath,
 						Size: info.Size(),
 					})
 				}
@@ -354,7 +365,7 @@ func (h *Handler) findNFO(w http.ResponseWriter, r *http.Request) {
 		"guid":      guid,
 		"title":     title,
 		"type":      itemType,
-		"dirs":      uniqueDirs,
+		"file_dirs": fileDirs,
 		"nfo_files": nfoFiles,
 	})
 }
