@@ -6,7 +6,17 @@ INSTALL_DIR="/opt/fnSqlJob"
 SERVICE_FILE="/etc/systemd/system/${APP_NAME}.service"
 GITHUB_REPO="dingdadao/FnSqlJob"
 GITHUB_PROXY="https://githubotc.dension.dpdns.org"
-DOWNLOAD_URL="${GITHUB_PROXY}/https://github.com/${GITHUB_REPO}/releases/latest/download/${APP_NAME}"
+GITHUB_API="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
+
+get_latest_version() {
+    local ver
+    if command -v curl &>/dev/null; then
+        ver=$(curl -fsSL "${GITHUB_API}" 2>/dev/null | grep '"tag_name"' | head -1 | sed -E 's/.*"tag_name":\s*"([^"]+)".*/\1/')
+    elif command -v wget &>/dev/null; then
+        ver=$(wget -qO- "${GITHUB_API}" 2>/dev/null | grep '"tag_name"' | head -1 | sed -E 's/.*"tag_name":\s*"([^"]+)".*/\1/')
+    fi
+    echo "${ver}"
+}
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -24,14 +34,22 @@ check_root() {
 }
 
 download_binary() {
-    log "从 GitHub 下载最新版本 ..."
     mkdir -p "${INSTALL_DIR}"
+
+    local version=$(get_latest_version)
+    if [ -z "${version}" ]; then
+        err "无法获取最新版本号，请检查网络或手动下载: https://github.com/${GITHUB_REPO}/releases"
+    fi
+    log "最新版本: ${version}"
+
+    local download_url="${GITHUB_PROXY}/https://github.com/${GITHUB_REPO}/releases/download/${version}/${APP_NAME}"
     local tmp_file="${INSTALL_DIR}/${APP_NAME}.tmp"
 
+    log "从 GitHub 下载 ..."
     if command -v curl &>/dev/null; then
-        curl -fSL -o "${tmp_file}" "${DOWNLOAD_URL}" || err "下载失败，请检查网络或手动下载"
+        curl -fSL -o "${tmp_file}" "${download_url}" || err "下载失败，请手动下载: https://github.com/${GITHUB_REPO}/releases"
     elif command -v wget &>/dev/null; then
-        wget -O "${tmp_file}" "${DOWNLOAD_URL}" || err "下载失败，请检查网络或手动下载"
+        wget -O "${tmp_file}" "${download_url}" || err "下载失败，请手动下载: https://github.com/${GITHUB_REPO}/releases"
     else
         err "需要 curl 或 wget，请先安装"
     fi
@@ -40,18 +58,12 @@ download_binary() {
     local file_size=$(stat -c%s "${tmp_file}" 2>/dev/null || stat -f%z "${tmp_file}" 2>/dev/null || echo 0)
     if [ "${file_size}" -lt 1000000 ]; then
         rm -f "${tmp_file}"
-        err "下载失败: 文件仅 ${file_size} 字节，可能代理不支持重定向。请手动下载: https://github.com/${GITHUB_REPO}/releases/latest"
-    fi
-
-    local file_type=$(file "${tmp_file}" 2>/dev/null)
-    if echo "${file_type}" | grep -qi "html\|text"; then
-        rm -f "${tmp_file}"
-        err "下载失败: 返回了 HTML 页面。请手动下载: https://github.com/${GITHUB_REPO}/releases/latest"
+        err "下载失败: 文件仅 ${file_size} 字节。请手动下载: https://github.com/${GITHUB_REPO}/releases"
     fi
 
     mv -f "${tmp_file}" "${INSTALL_DIR}/${APP_NAME}"
     chmod +x "${INSTALL_DIR}/${APP_NAME}"
-    log "下载完成 (${file_size} bytes)"
+    log "下载完成 ${version} (${file_size} bytes)"
 }
 
 install_binary() {
