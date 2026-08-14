@@ -4,7 +4,8 @@ set -e
 APP_NAME="fnsqldb"
 INSTALL_DIR="/opt/fnSqlJob"
 SERVICE_FILE="/etc/systemd/system/${APP_NAME}.service"
-BINARY_URL=""  # 留空则从本地复制
+GITHUB_REPO="dingdadao/FnSqlJob"
+DOWNLOAD_URL="https://github.com/${GITHUB_REPO}/releases/latest/download/${APP_NAME}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -21,20 +22,38 @@ check_root() {
     fi
 }
 
-install_binary() {
-    log "安装 ${APP_NAME} 到 ${INSTALL_DIR} ..."
+download_binary() {
+    log "从 GitHub 下载最新版本 ..."
     mkdir -p "${INSTALL_DIR}"
 
-    if [ -f "./fnsqldb" ]; then
-        cp -f ./fnsqldb "${INSTALL_DIR}/${APP_NAME}"
-    elif [ -f "./fnsqldb-linux" ]; then
-        cp -f ./fnsqldb-linux "${INSTALL_DIR}/${APP_NAME}"
+    if command -v curl &>/dev/null; then
+        curl -fSL -o "${INSTALL_DIR}/${APP_NAME}" "${DOWNLOAD_URL}" || err "下载失败，请检查网络或手动下载"
+    elif command -v wget &>/dev/null; then
+        wget -O "${INSTALL_DIR}/${APP_NAME}" "${DOWNLOAD_URL}" || err "下载失败，请检查网络或手动下载"
     else
-        err "未找到 fnsqldb 二进制文件，请先执行 build.sh 编译"
+        err "需要 curl 或 wget，请先安装"
     fi
 
     chmod +x "${INSTALL_DIR}/${APP_NAME}"
-    log "二进制安装完成"
+    log "下载完成: $(${INSTALL_DIR}/${APP_NAME} --help 2>&1 | head -1 || echo 'ok')"
+}
+
+install_binary() {
+    mkdir -p "${INSTALL_DIR}"
+
+    # 优先使用本地文件
+    if [ -f "./fnsqldb" ]; then
+        log "使用本地二进制 ..."
+        cp -f ./fnsqldb "${INSTALL_DIR}/${APP_NAME}"
+        chmod +x "${INSTALL_DIR}/${APP_NAME}"
+    elif [ -f "./fnsqldb-linux" ]; then
+        log "使用本地二进制 ..."
+        cp -f ./fnsqldb-linux "${INSTALL_DIR}/${APP_NAME}"
+        chmod +x "${INSTALL_DIR}/${APP_NAME}"
+    else
+        # 本地没有则从 GitHub 下载
+        download_binary
+    fi
 }
 
 install_service() {
@@ -79,14 +98,14 @@ show_usage() {
     echo "用法: sudo bash install.sh [命令]"
     echo ""
     echo "命令:"
-    echo "  install    安装服务并设置开机自启 (默认)"
+    echo "  install    安装服务 (本地有二进制用本地，否则从 GitHub 下载)"
+    echo "  update     从 GitHub 下载最新版本并重启"
     echo "  start      启动服务"
     echo "  stop       停止服务"
     echo "  restart    重启服务"
     echo "  status     查看服务状态"
     echo "  logs       查看实时日志"
     echo "  uninstall  卸载服务"
-    echo "  update     更新二进制文件 (不停止服务会自动重启)"
 }
 
 case "${1:-install}" in
@@ -98,13 +117,13 @@ case "${1:-install}" in
         systemctl start "${APP_NAME}"
         log "安装完成，服务已启动"
         echo ""
-        echo "  启动: bash install.sh start"
-        echo "  停止: bash install.sh stop"
-        echo "  重启: bash install.sh restart"
-        echo "  状态: bash install.sh status"
-        echo "  日志: bash install.sh logs"
-        echo "  卸载: bash install.sh uninstall"
-        echo ""
+        systemctl status "${APP_NAME}" --no-pager
+        ;;
+    update)
+        check_root
+        download_binary
+        systemctl restart "${APP_NAME}"
+        log "更新完成，服务已重启"
         systemctl status "${APP_NAME}" --no-pager
         ;;
     start)
@@ -131,12 +150,6 @@ case "${1:-install}" in
     uninstall)
         check_root
         uninstall
-        ;;
-    update)
-        check_root
-        install_binary
-        systemctl restart "${APP_NAME}"
-        log "更新完成，服务已重启"
         ;;
     *)
         show_usage
