@@ -13,9 +13,9 @@ import (
 )
 
 type DBManager struct {
-	dir  string
-	mu   sync.RWMutex
-	dbs  map[string]*sql.DB
+	dir string
+	mu  sync.RWMutex
+	dbs map[string]*sql.DB
 }
 
 func NewDBManager(dir string) (*DBManager, error) {
@@ -120,7 +120,7 @@ type ColumnInfo struct {
 	Type         string      `json:"type"`
 	NotNull      bool        `json:"notnull"`
 	DefaultValue interface{} `json:"dflt_value"`
-	PK           bool        `json:"pk"`
+	PK           int         `json:"pk"`
 }
 
 func (m *DBManager) GetTableSchema(dbName, table string) ([]ColumnInfo, error) {
