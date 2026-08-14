@@ -1,0 +1,5 @@
+fnsqldb
+fnsqldb-*
+*.db
+*.log
+.DS_Store
