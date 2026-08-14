@@ -239,6 +239,38 @@ curl -X DELETE http://10.0.0.4:8877/api/db/trimmedia.db/table/sys_metadata \
 
 ---
 
+## 7. 批量文件删除
+
+### `POST /api/files/delete`
+
+批量删除服务器上的文件。
+
+**请求体:**
+
+```json
+{"paths": ["/path/to/file1.mkv", "/path/to/file2.nfo"]}
+```
+
+```bash
+curl -X POST http://10.0.0.4:8877/api/files/delete \
+  -H 'Content-Type: application/json' \
+  -d '{"paths": ["/vol1/movie/test.mkv", "/vol1/movie/test.nfo"]}'
+```
+
+```json
+{
+  "code": 0,
+  "data": [
+    {"path": "/vol1/movie/test.mkv", "success": true},
+    {"path": "/vol1/movie/test.nfo", "success": true}
+  ]
+}
+```
+
+每个文件独立处理，单个失败不影响其他文件。文件不存在返回 `"error": "file not found"`。
+
+---
+
 ## 常用查询示例
 
 ```sql

@@ -3,12 +3,9 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"mime"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -21,7 +18,6 @@ func RegisterRoutes(mux *http.ServeMux, h *Handler) {
 	mux.HandleFunc("/api/db/", h.routeDB)
 	mux.HandleFunc("/api/health", h.health)
 	mux.HandleFunc("/api/files/delete", h.deleteFiles)
-	mux.HandleFunc("/proxy/", h.proxyFile)
 }
 
 func (h *Handler) health(w http.ResponseWriter, r *http.Request) {
@@ -253,49 +249,6 @@ func (h *Handler) deleteFiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonOK(w, results)
-}
-
-func (h *Handler) proxyFile(w http.ResponseWriter, r *http.Request) {
-	// /proxy/path/to/file.jpg -> path/to/file.jpg
-	filePath := strings.TrimPrefix(r.URL.Path, "/proxy/")
-	if filePath == "" {
-		http.Error(w, "file path required", http.StatusBadRequest)
-		return
-	}
-
-	// 尝试作为绝对路径打开，也支持相对路径
-	file, err := os.Open(filePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			http.Error(w, "file not found", http.StatusNotFound)
-		} else {
-			http.Error(w, "open error: "+err.Error(), http.StatusInternalServerError)
-		}
-		return
-	}
-	defer file.Close()
-
-	stat, err := file.Stat()
-	if err != nil {
-		http.Error(w, "stat error", http.StatusInternalServerError)
-		return
-	}
-	if stat.IsDir() {
-		http.Error(w, "is a directory", http.StatusBadRequest)
-		return
-	}
-
-	// 自动检测 Content-Type
-	ext := filepath.Ext(filePath)
-	contentType := mime.TypeByExtension(ext)
-	if contentType == "" {
-		contentType = "application/octet-stream"
-	}
-
-	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", stat.Size()))
-	w.Header().Set("Cache-Control", "public, max-age=86400")
-	io.Copy(w, file)
 }
 
 func jsonOK(w http.ResponseWriter, data interface{}) {
