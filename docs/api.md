@@ -379,3 +379,64 @@ curl http://10.0.0.4:8877/img/4b/17/RXFg9YOlYYTNwMynBkZifbn3VpVnzd401lk1CjS099E0
 # 3. 浏览器直接访问
 http://10.0.0.4:8877/img/4b/17/RXFg9YOlYYTNwMynBkZifbn3VpVnzd401lk1CjS099E0CKLruYvoiOtANtogjM0AGQ1uEkAFXd3D3HmLdXX3Ce1ftv.webp?size=400
 ```
+
+---
+
+## 9. NFO 文件搜索
+
+### `GET /api/nfo/{item_guid}`
+
+根据影片 GUID，在影片文件所在目录中搜索 `.nfo` 元数据文件。
+
+**搜索策略：**
+- **Movie** → 文件目录 + 上级目录
+- **TV/Season/Episode** → 文件目录 + 向上 5 级父目录（覆盖剧集嵌套结构）
+
+**示例：**
+
+```bash
+# 查询影片的 NFO 文件
+curl http://10.0.0.4:8877/api/nfo/55d48ca5be2f4e8ab51c332385108a49
+```
+
+```json
+{
+  "code": 0,
+  "data": {
+    "guid": "55d48ca5be2f4e8ab51c332385108a49",
+    "title": "郊游",
+    "type": "Movie",
+    "dirs": ["/vol02/1000-0-61001e81/goodStuff/movie/郊游.Picnic.2023.1080p.Friday.WEB-DL.AAC.H264-HDSWEB"],
+    "nfo_files": [
+      {
+        "path": "/vol02/.../郊游.Picnic.2023...nfo",
+        "size": 3514
+      }
+    ]
+  }
+}
+```
+
+**配合 SQL 查询使用：**
+
+```bash
+# 1. 先查出影片 GUID
+curl -X POST http://10.0.0.4:8877/api/db/trimmedia.db/query \
+  -H 'Content-Type: application/json' \
+  -d '{"sql": "SELECT guid, title FROM item WHERE title = \"郊游\" AND type = \"Movie\" LIMIT 1"}'
+
+# 2. 用 GUID 查询 NFO
+curl http://10.0.0.4:8877/api/nfo/55d48ca5be2f4e8ab51c332385108a49
+```
+
+**目录结构覆盖：**
+
+```
+Movie:  /vol1/movie/电影名/movie.nfo  ← 直接找到
+
+TV:     /vol1/TV/剧名/                ← show.nfo (向上找到)
+          Season 1/                   ← season.nfo (向上找到)
+            S01E01.mkv               ← Episode 文件在这里
+```
+
+> **注意：** 如果文件所在挂载点不可用（如 `mounts_kuake`），目录无法访问会返回空结果。
