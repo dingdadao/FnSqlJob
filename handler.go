@@ -313,11 +313,15 @@ func (h *Handler) findNFO(w http.ResponseWriter, r *http.Request) {
 
 	// 搜索 nfo 文件
 	type nfoResult struct {
-		Path string `json:"path"`
-		Size int64  `json:"size"`
+		Path    string `json:"path"`
+		Size    int64  `json:"size"`
+		Content string `json:"content,omitempty"`
 	}
 	var nfoFiles []nfoResult
 	seenPaths := make(map[string]bool)
+
+	// ?raw 参数：直接返回第一个 NFO 的 XML 内容
+	rawMode := r.URL.Query().Get("raw") == "true"
 
 	for dir := range searchDirs {
 		entries, err := os.ReadDir(dir)
@@ -336,12 +340,27 @@ func (h *Handler) findNFO(w http.ResponseWriter, r *http.Request) {
 				}
 				seenPaths[fullPath] = true
 				info, err := entry.Info()
-				if err == nil {
-					nfoFiles = append(nfoFiles, nfoResult{
-						Path: fullPath,
-						Size: info.Size(),
-					})
+				if err != nil {
+					continue
 				}
+				nr := nfoResult{
+					Path: fullPath,
+					Size: info.Size(),
+				}
+				// 读取文件内容（限制 1MB）
+				if info.Size() > 0 && info.Size() < 1024*1024 {
+					data, err := os.ReadFile(fullPath)
+					if err == nil {
+						nr.Content = string(data)
+					}
+				}
+				if rawMode {
+					// 直接返回第一个 NFO 的 XML
+					w.Header().Set("Content-Type", "application/xml")
+					w.Write([]byte(nr.Content))
+					return
+				}
+				nfoFiles = append(nfoFiles, nr)
 			}
 		}
 	}
