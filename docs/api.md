@@ -292,3 +292,90 @@ SELECT p.name, ip.role, ip.job FROM item_person ip JOIN person p ON ip.person_gu
 -- 查看用户收藏
 SELECT i.title, iuf.create_time FROM item_user_favorite iuf JOIN item i ON iuf.item_guid = i.guid WHERE iuf.user_guid = 'xxx'
 ```
+
+---
+
+## 8. 图片代理
+
+### `GET /img/{path}?size={size}`
+
+代理返回影片的海报、背景图、Logo 等图片。自动从数据库 `sys_metadata` 表读取 `mediasrv_cache_dir`（如 `/vol1`）拼接实际文件路径。
+
+### 图片类型
+
+数据库 `item` 表中存储了以下图片路径字段：
+
+| 字段 | 说明 | 示例 |
+|------|------|------|
+| `posters` | 海报图（竖版） | `/4b/17/RXFg9YOl...webp` |
+| `backdrops` | 背景图（横版） | `/a8/20/RXFg9YOl...webp` |
+| `logos` | Logo 图 | `/xx/xx/xxx.webp` |
+| `still_path` | 剧照（剧集用） | `/xx/xx/xxx.webp` |
+
+### URL 拼接规则
+
+数据库中存储的是相对路径（如 `/4b/17/xxx.webp`），拼接到 `/img/` 后面即可：
+
+```
+GET http://<server>:8877/img{数据库中的路径}
+```
+
+**示例：**
+
+```bash
+# 数据库 posters = /4b/17/RXFg9YOl...webp
+GET /img/4b/17/RXFg9YOlYYTNwMynBkZifbn3VpVnzd401lk1CjS099E0CKLruYvoiOtANtogjM0AGQ1uEkAFXd3D3HmLdXX3Ce1ftv.webp
+
+# 指定尺寸 (后缀 .400.0.-1)
+GET /img/4b/17/xxx.webp?size=400
+
+# 原图 (不带尺寸后缀)
+GET /img/4b/17/xxx.webp?size=0
+```
+
+### 实际文件路径映射
+
+```
+数据库路径:  /4b/17/xxx.webp
+请求:       GET /img/4b/17/xxx.webp?size=400
+实际文件:   {mediasrv_cache_dir}/@appmeta/trim.media/cache/img/4b/17/xxx.webp.400.0.-1
+```
+
+其中 `mediasrv_cache_dir` 从 `trimmedia.db` 的 `sys_metadata` 表自动读取，通常为 `/vol1`、`/vol2` 等。
+
+### size 参数说明
+
+| 值 | 说明 |
+|------|------|
+| 400 | 默认，400px 宽度缩略图 |
+| 200 | 200px 小缩略图 |
+| 0 | 原图（不带尺寸后缀） |
+
+> **注意：** 图片缓存按需生成，部分图片可能未缓存返回 404。只有被访问过的图片才会在缓存目录中存在。
+
+### 查询图片路径
+
+```sql
+-- 查询影片的图片路径
+SELECT title, posters, backdrops, logos FROM item WHERE type = 'Movie' AND posters IS NOT NULL LIMIT 10
+
+-- 查询指定影片
+SELECT posters, backdrops FROM item WHERE title = '郊游' AND type = 'Movie'
+```
+
+### 完整使用流程
+
+```bash
+# 1. 查询影片海报路径
+curl -X POST http://10.0.0.4:8877/api/db/trimmedia.db/query \
+  -H 'Content-Type: application/json' \
+  -d '{"sql": "SELECT posters FROM item WHERE title = \"郊游\" AND type = \"Movie\" LIMIT 1"}'
+
+# 返回: {"data": {"rows": [["/4b/17/RXFg9YOl...webp"]]}}
+
+# 2. 拼接图片 URL
+curl http://10.0.0.4:8877/img/4b/17/RXFg9YOlYYTNwMynBkZifbn3VpVnzd401lk1CjS099E0CKLruYvoiOtANtogjM0AGQ1uEkAFXd3D3HmLdXX3Ce1ftv.webp
+
+# 3. 浏览器直接访问
+http://10.0.0.4:8877/img/4b/17/RXFg9YOlYYTNwMynBkZifbn3VpVnzd401lk1CjS099E0CKLruYvoiOtANtogjM0AGQ1uEkAFXd3D3HmLdXX3Ce1ftv.webp?size=400
+```
