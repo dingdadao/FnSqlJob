@@ -26,17 +26,32 @@ check_root() {
 download_binary() {
     log "从 GitHub 下载最新版本 ..."
     mkdir -p "${INSTALL_DIR}"
+    local tmp_file="${INSTALL_DIR}/${APP_NAME}.tmp"
 
     if command -v curl &>/dev/null; then
-        curl -fSL -o "${INSTALL_DIR}/${APP_NAME}" "${DOWNLOAD_URL}" || err "下载失败，请检查网络或手动下载"
+        curl -fSL -o "${tmp_file}" "${DOWNLOAD_URL}" || err "下载失败，请检查网络或手动下载"
     elif command -v wget &>/dev/null; then
-        wget -O "${INSTALL_DIR}/${APP_NAME}" "${DOWNLOAD_URL}" || err "下载失败，请检查网络或手动下载"
+        wget -O "${tmp_file}" "${DOWNLOAD_URL}" || err "下载失败，请检查网络或手动下载"
     else
         err "需要 curl 或 wget，请先安装"
     fi
 
+    # 验证下载的是二进制文件 (不是 HTML)
+    local file_size=$(stat -c%s "${tmp_file}" 2>/dev/null || stat -f%z "${tmp_file}" 2>/dev/null || echo 0)
+    if [ "${file_size}" -lt 1000000 ]; then
+        rm -f "${tmp_file}"
+        err "下载失败: 文件仅 ${file_size} 字节，可能代理不支持重定向。请手动下载: https://github.com/${GITHUB_REPO}/releases/latest"
+    fi
+
+    local file_type=$(file "${tmp_file}" 2>/dev/null)
+    if echo "${file_type}" | grep -qi "html\|text"; then
+        rm -f "${tmp_file}"
+        err "下载失败: 返回了 HTML 页面。请手动下载: https://github.com/${GITHUB_REPO}/releases/latest"
+    fi
+
+    mv -f "${tmp_file}" "${INSTALL_DIR}/${APP_NAME}"
     chmod +x "${INSTALL_DIR}/${APP_NAME}"
-    log "下载完成: $(${INSTALL_DIR}/${APP_NAME} --help 2>&1 | head -1 || echo 'ok')"
+    log "下载完成 (${file_size} bytes)"
 }
 
 install_binary() {
