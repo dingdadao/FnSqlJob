@@ -14,9 +14,8 @@ var (
 	Version   = "dev"
 	BuildTime = "unknown"
 
-	dbPath  = flag.String("dbpath", "/usr/local/apps/@appdata/trim.media/database/", "SQLite database directory")
-	imgPath = flag.String("imgpath", "/vol1/@appmeta/trim.media/cache/img", "Image cache directory")
-	addr    = flag.String("addr", ":8877", "HTTP listen address")
+	dbPath = flag.String("dbpath", "/usr/local/apps/@appdata/trim.media/database/", "SQLite database directory")
+	addr   = flag.String("addr", ":8877", "HTTP listen address")
 )
 
 func main() {
@@ -32,8 +31,11 @@ func main() {
 	}
 	defer dbm.Close()
 
+	// 从 sys_metadata 读取 mediasrv_cache_dir 动态构建图片路径
+	imgBase := resolveImageBase(dbm)
+
 	mux := http.NewServeMux()
-	h := &Handler{dbm: dbm, imgBase: *imgPath}
+	h := &Handler{dbm: dbm, imgBase: imgBase}
 	RegisterRoutes(mux, h)
 
 	server := &http.Server{Addr: *addr, Handler: corsMiddleware(logMiddleware(mux))}
@@ -49,9 +51,31 @@ func main() {
 	fmt.Printf("FnSqlDB %s (built %s)\n", Version, BuildTime)
 	fmt.Printf("Listening on %s\n", *addr)
 	fmt.Printf("Database path: %s\n", *dbPath)
+	fmt.Printf("Image base: %s\n", imgBase)
 	if err := server.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatalf("server error: %v", err)
 	}
+}
+
+func resolveImageBase(dbm *DBManager) string {
+	const defaultSuffix = "/@appmeta/trim.media/cache/img"
+
+	// 尝试从 trimmedia.db 的 sys_metadata 表读取 mediasrv_cache_dir
+	db := dbm.GetDB("trimmedia.db")
+	if db == nil {
+		log.Printf("warning: cannot open trimmedia.db, using default img path")
+		return "/vol1" + defaultSuffix
+	}
+
+	var cacheDir string
+	err := db.QueryRow("SELECT value FROM sys_metadata WHERE key = 'mediasrv_cache_dir'").Scan(&cacheDir)
+	if err != nil || cacheDir == "" {
+		log.Printf("warning: cannot read mediasrv_cache_dir: %v, using default", err)
+		return "/vol1" + defaultSuffix
+	}
+
+	log.Printf("mediasrv_cache_dir: %s", cacheDir)
+	return cacheDir + defaultSuffix
 }
 
 func corsMiddleware(next http.Handler) http.Handler {

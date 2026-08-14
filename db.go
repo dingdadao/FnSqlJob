@@ -71,6 +71,12 @@ func (m *DBManager) getDB(name string) (*sql.DB, error) {
 	return db, nil
 }
 
+// GetDB returns the raw *sql.DB for a database, or nil if not found.
+func (m *DBManager) GetDB(name string) *sql.DB {
+	db, _ := m.getDB(name)
+	return db
+}
+
 func (m *DBManager) Close() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
