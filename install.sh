@@ -6,7 +6,7 @@ INSTALL_DIR="/opt/fnSqlJob"
 SERVICE_FILE="/etc/systemd/system/${APP_NAME}.service"
 GITHUB_REPO="dingdadao/FnSqlJob"
 GITHUB_PROXY="https://githubotc.dension.dpdns.org"
-DOWNLOAD_URL="${GITHUB_PROXY}/${GITHUB_REPO}/releases/latest/download/${APP_NAME}"
+DOWNLOAD_URL="${GITHUB_PROXY}/https://github.com/${GITHUB_REPO}/releases/latest/download/${APP_NAME}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'

@@ -17,7 +17,7 @@ bash build.sh
 
 ```bash
 # 一键安装 (自动下载最新二进制，install.sh 内部会检查 root 权限)
-curl -fsSL https://githubotc.dension.dpdns.org/https://raw.githubusercontent.com/dingdadao/FnSqlJob/main/install.sh | sudo bash -s install
+curl -fsSL https://githubotc.dension.dpdns.org/https://raw.githubusercontent.com/dingdadao/FnSqlJob/main/install.sh -o /tmp/install.sh && sudo bash /tmp/install.sh install
 
 # 或手动安装
 scp fnsqldb install.sh root@<server_ip>:/opt/fnSqlJob/
