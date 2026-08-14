@@ -54,7 +54,7 @@ func (m *DBManager) getDB(name string) (*sql.DB, error) {
 		return nil, fmt.Errorf("database file not found: %s", path)
 	}
 
-	dsn := fmt.Sprintf("file:%s?mode=rw", path)
+	dsn := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=5000", path)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
