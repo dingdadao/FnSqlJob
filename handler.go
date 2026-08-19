@@ -511,8 +511,8 @@ func (h *Handler) mediaInfo(w http.ResponseWriter, r *http.Request, mediaGuid st
 	rows, err := db.Query(`
 		SELECT codec_type, codec_name, language, width, height, bps,
 		       channels, sample_rate, is_default, forced, is_external,
-		       profile, pix_fmt, duration, index
-		FROM media_stream WHERE media_guid = ? ORDER BY codec_type, index
+		       profile, pix_fmt, duration, "index"
+		FROM media_stream WHERE media_guid = ? ORDER BY codec_type, "index"
 	`, mediaGuid)
 	if err != nil {
 		jsonError(w, "stream query error: "+err.Error(), http.StatusInternalServerError)
@@ -662,6 +662,7 @@ func (h *Handler) streamMedia(w http.ResponseWriter, r *http.Request, mediaGuid 
 			TargetHeight:  parseIntDefault(r.URL.Query().Get("height"), 0),
 			StartTime:     r.URL.Query().Get("start"),
 			Duration:      r.URL.Query().Get("duration"),
+			HwOverride:    r.URL.Query().Get("hw"),
 		}
 		transcodeStream(w, r, filePath, params)
 
@@ -857,9 +858,10 @@ func (h *Handler) playInfo(w http.ResponseWriter, r *http.Request, mediaGuid str
 
 		// Available stream URLs
 		"stream_urls": map[string]interface{}{
-			"direct":      baseURL + "/stream?mode=direct",
-			"transcode":   baseURL + "/stream?mode=transcode",
-			"auto":        baseURL + "/stream?mode=auto",
+			"direct":        baseURL + "/stream?mode=direct",
+			"transcode":     baseURL + "/stream?mode=transcode",
+			"transcode_cpu": baseURL + "/stream?mode=transcode&hw=cpu",
+			"auto":          baseURL + "/stream?mode=auto",
 			"transcode_custom": fmt.Sprintf("%s/stream?mode=transcode&vcodec=h264&acodec=aac&bitrate=4000&height=1080", baseURL),
 		},
 	})
@@ -870,8 +872,8 @@ func (h *Handler) getMediaStreams(db *sql.DB, mediaGuid string) []StreamInfo {
 	rows, err := db.Query(`
 		SELECT codec_type, codec_name, language, width, height, bps,
 		       channels, sample_rate, is_default, forced, is_external,
-		       profile, pix_fmt, duration, index
-		FROM media_stream WHERE media_guid = ? ORDER BY codec_type, index
+		       profile, pix_fmt, duration, "index"
+		FROM media_stream WHERE media_guid = ? ORDER BY codec_type, "index"
 	`, mediaGuid)
 	if err != nil {
 		return nil

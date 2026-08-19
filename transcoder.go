@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"log"
@@ -28,6 +29,7 @@ type TranscodeParams struct {
 	TargetHeight  int    // target resolution height (0 = source)
 	StartTime     string // seek position (HH:MM:SS or seconds)
 	Duration      string // duration to transcode
+	HwOverride    string // "cpu" to force software encoding (skip GPU)
 }
 
 var (
@@ -83,10 +85,22 @@ func detectTranscoderConfig() *TranscoderConfig {
 	return cfg
 }
 
+// effectiveGPUType returns the GPU type after applying frontend override
+func effectiveGPUType(params TranscodeParams, cfg *TranscoderConfig) string {
+	if params.HwOverride == "cpu" {
+		return "cpu"
+	}
+	return cfg.GPUType
+}
+
 // buildFFmpegArgs constructs the FFmpeg command line for transcoding.
 // The output is fragmented MP4 piped to stdout.
 func buildFFmpegArgs(inputPath string, params TranscodeParams, cfg *TranscoderConfig) []string {
+	gpuType := effectiveGPUType(params, cfg)
 	args := []string{}
+
+	// Suppress verbose output, keep errors
+	args = append(args, "-loglevel", "error")
 
 	// Seek position BEFORE -i for fast seek (no decode before seeking)
 	if params.StartTime != "" {
@@ -94,17 +108,18 @@ func buildFFmpegArgs(inputPath string, params TranscodeParams, cfg *TranscoderCo
 	}
 
 	// Hardware acceleration for DECODING the input
-	switch cfg.GPUType {
+	// Note: we do NOT use -hwaccel_output_format here.
+	// Software filters (scale) need frames in system memory.
+	// hwupload will push them back to GPU for encoding.
+	switch gpuType {
 	case "vaapi":
 		args = append(args,
 			"-hwaccel", "vaapi",
-			"-hwaccel_output_format", "nv12",
 			"-vaapi_device", cfg.GPUDevice,
 		)
 	case "nvenc":
 		args = append(args,
 			"-hwaccel", "cuda",
-			"-hwaccel_output_format", "cuda",
 		)
 	}
 
@@ -121,7 +136,7 @@ func buildFFmpegArgs(inputPath string, params TranscodeParams, cfg *TranscoderCo
 	if vcodec == "" {
 		vcodec = "h264"
 	}
-	switch cfg.GPUType {
+	switch gpuType {
 	case "vaapi":
 		if vcodec == "hevc" {
 			args = append(args, "-c:v", "hevc_vaapi")
@@ -154,13 +169,19 @@ func buildFFmpegArgs(inputPath string, params TranscodeParams, cfg *TranscoderCo
 		"-bufsize", fmt.Sprintf("%dk", bitrate*2),
 	)
 
-	// Resolution scaling + pixel format for hardware encoding
+	// Build filter chain
+	// For VAAPI: software scale → format nv12 → hwupload to GPU surfaces
+	// For NVENC: software scale → format nv12 → hwupload_cuda
+	// For CPU: software scale only
 	filters := []string{}
 	if params.TargetHeight > 0 {
 		filters = append(filters, fmt.Sprintf("scale=-2:%d", params.TargetHeight))
 	}
-	if cfg.GPUType == "vaapi" {
-		filters = append(filters, "format=nv12")
+	switch gpuType {
+	case "vaapi":
+		filters = append(filters, "format=nv12", "hwupload")
+	case "nvenc":
+		filters = append(filters, "format=nv12", "hwupload_cuda")
 	}
 	if len(filters) > 0 {
 		args = append(args, "-vf", strings.Join(filters, ","))
@@ -184,8 +205,7 @@ func buildFFmpegArgs(inputPath string, params TranscodeParams, cfg *TranscoderCo
 }
 
 // transcodeStream runs FFmpeg and pipes its stdout to the HTTP response.
-// The client receives a fragmented MP4 stream in real-time.
-// Seek support is limited (no Range) — for seekable transcoding use HLS mode.
+// If GPU transcoding produces 0 bytes, it automatically retries with CPU.
 func transcodeStream(w http.ResponseWriter, r *http.Request, inputPath string, params TranscodeParams) {
 	cfg := getTranscoderConfig()
 	if cfg.FFmpegPath == "" {
@@ -193,12 +213,23 @@ func transcodeStream(w http.ResponseWriter, r *http.Request, inputPath string, p
 		return
 	}
 
-	args := buildFFmpegArgs(inputPath, params, cfg)
-	log.Printf("transcode start: %s %s", cfg.FFmpegPath, strings.Join(args, " "))
+	// Detect ISO files — FFmpeg can't directly read disc images
+	if strings.HasSuffix(strings.ToLower(inputPath), ".iso") {
+		http.Error(w, "ISO disc images are not supported for transcoding. Use direct mode or mount the ISO first.", http.StatusBadRequest)
+		return
+	}
 
+	gpuType := effectiveGPUType(params, cfg)
+
+	// First attempt: use detected GPU (or CPU if no GPU)
+	args := buildFFmpegArgs(inputPath, params, cfg)
+	log.Printf("transcode start [%s]: %s %s", gpuType, cfg.FFmpegPath, strings.Join(args, " "))
+
+	// Capture stderr for error reporting
+	var stderrBuf bytes.Buffer
 	ctx := r.Context()
 	cmd := exec.CommandContext(ctx, cfg.FFmpegPath, args...)
-	cmd.Stderr = &ffmpegLogWriter{}
+	cmd.Stderr = io.MultiWriter(&stderrBuf, &ffmpegLogWriter{})
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -211,25 +242,81 @@ func transcodeStream(w http.ResponseWriter, r *http.Request, inputPath string, p
 		return
 	}
 
-	// Headers for fragmented MP4 streaming
+	// Read first bytes to check if FFmpeg is actually producing output
+	// We use a peeking reader to check
+	peekSize := 4096
+	peekBuf := make([]byte, peekSize)
+	n, _ := io.ReadFull(stdout, peekBuf)
+	peekBuf = peekBuf[:n]
+
+	// If GPU mode produced 0 bytes and we have GPU, retry with CPU
+	if n == 0 && gpuType != "cpu" {
+		log.Printf("transcode: GPU (%s) produced 0 bytes, falling back to CPU", gpuType)
+		cmd.Wait()
+
+		// Retry with CPU
+		cpuParams := params
+		cpuParams.HwOverride = "cpu"
+		cpuArgs := buildFFmpegArgs(inputPath, cpuParams, cfg)
+		log.Printf("transcode retry [cpu]: %s %s", cfg.FFmpegPath, strings.Join(cpuArgs, " "))
+
+		stderrBuf.Reset()
+		cmd = exec.CommandContext(ctx, cfg.FFmpegPath, cpuArgs...)
+		cmd.Stderr = io.MultiWriter(&stderrBuf, &ffmpegLogWriter{})
+
+		stdout, err = cmd.StdoutPipe()
+		if err != nil {
+			http.Error(w, "pipe error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := cmd.Start(); err != nil {
+			http.Error(w, "ffmpeg start error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// Re-peek
+		n, _ = io.ReadFull(stdout, peekBuf[:peekSize])
+		peekBuf = peekBuf[:n]
+		gpuType = "cpu"
+	}
+
+	// Set response headers
 	w.Header().Set("Content-Type", "video/mp4")
 	w.Header().Set("Cache-Control", "no-cache, no-store")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("X-Transcode-GPU", cfg.GPUType)
+	w.Header().Set("X-Transcode-GPU", gpuType)
 	w.Header().Set("X-Transcode-VCodec", defaultStr(params.TargetVCodec, "h264"))
 	w.Header().Set("X-Transcode-Bitrate", fmt.Sprintf("%d", params.TargetBitrate))
 
-	// Pipe FFmpeg stdout → HTTP response
-	// When client disconnects, ctx is cancelled → FFmpeg gets killed
+	// If still 0 bytes, return error with FFmpeg stderr
+	if n == 0 {
+		errMsg := strings.TrimSpace(stderrBuf.String())
+		log.Printf("transcode failed (0 bytes): %s", errMsg)
+		w.Header().Set("X-Transcode-Error", truncate(errMsg, 200))
+		http.Error(w, "FFmpeg produced no output: "+truncate(errMsg, 500), http.StatusInternalServerError)
+		cmd.Wait()
+		return
+	}
+
+	// Write the peeked bytes, then pipe the rest
+	w.WriteHeader(http.StatusOK)
+	w.Write(peekBuf)
 	io.Copy(w, stdout)
 
 	if err := cmd.Wait(); err != nil {
-		// ctx.Canceled is expected when client disconnects
 		if ctx.Err() == nil {
 			log.Printf("ffmpeg exited with error: %v", err)
 		}
 	}
-	log.Printf("transcode done: %s", inputPath)
+	log.Printf("transcode done [%s]: %s", gpuType, inputPath)
+}
+
+// truncate cuts a string to maxLen, adding "..." if truncated
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
 }
 
 // ffmpegLogWriter captures FFmpeg stderr for debugging
@@ -263,9 +350,9 @@ type codecCompatResult struct {
 // checkCodecCompatibility analyzes the media streams and returns compatibility info
 func checkCodecCompatibility(streams []StreamInfo) codecCompatResult {
 	result := codecCompatResult{
-		BrowserSafe:  true,
-		MobileSafe:   true,
-		DesktopSafe:   true,
+		BrowserSafe: true,
+		MobileSafe:  true,
+		DesktopSafe: true,
 	}
 
 	var videoCodec, audioCodec string
@@ -319,7 +406,6 @@ func checkCodecCompatibility(streams []StreamInfo) codecCompatResult {
 	}
 
 	// Desktop players (mpv/VLC/IINA) can decode almost anything
-	// But some exotic codecs still need transcoding
 	result.DesktopSafe = true
 
 	result.NeedTranscode = !result.BrowserSafe
