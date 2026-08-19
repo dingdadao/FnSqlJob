@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 )
 
@@ -14,8 +15,9 @@ var (
 	Version   = "dev"
 	BuildTime = "unknown"
 
-	dbPath = flag.String("dbpath", "/usr/local/apps/@appdata/trim.media/database/", "SQLite database directory")
-	addr   = flag.String("addr", ":8877", "HTTP listen address")
+	dbPath  = flag.String("dbpath", "/usr/local/apps/@appdata/trim.media/database/", "SQLite database directory")
+	addr    = flag.String("addr", ":8877", "HTTP listen address")
+	imgPath = flag.String("imgpath", "@appmeta/trim.media/img", "Image directory (relative to mediasrv_cache_dir)")
 )
 
 func main() {
@@ -58,24 +60,22 @@ func main() {
 }
 
 func resolveImageBase(dbm *DBManager) string {
-	const defaultSuffix = "/@appmeta/trim.media/cache/img"
-
 	// 尝试从 trimmedia.db 的 sys_metadata 表读取 mediasrv_cache_dir
 	db := dbm.GetDB("trimmedia.db")
 	if db == nil {
 		log.Printf("warning: cannot open trimmedia.db, using default img path")
-		return "/vol1" + defaultSuffix
+		return "/vol1/" + *imgPath
 	}
 
 	var cacheDir string
 	err := db.QueryRow("SELECT value FROM sys_metadata WHERE key = 'mediasrv_cache_dir'").Scan(&cacheDir)
 	if err != nil || cacheDir == "" {
 		log.Printf("warning: cannot read mediasrv_cache_dir: %v, using default", err)
-		return "/vol1" + defaultSuffix
+		return "/vol1/" + *imgPath
 	}
 
 	log.Printf("mediasrv_cache_dir: %s", cacheDir)
-	return cacheDir + defaultSuffix
+	return strings.TrimRight(cacheDir, "/") + "/" + *imgPath
 }
 
 func corsMiddleware(next http.Handler) http.Handler {

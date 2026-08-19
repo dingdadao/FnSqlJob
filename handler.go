@@ -375,7 +375,7 @@ func (h *Handler) findNFO(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) proxyImage(w http.ResponseWriter, r *http.Request) {
-	// /img/{path} -> /vol1/@appmeta/trim.media/cache/img/{path}.{size}.0.-1
+	// /img/{path} -> {cacheDir}/{imgDir}/{path} 或 {cacheDir}/{imgDir}/{path}.{size}.0.-1
 	imgPath := strings.TrimPrefix(r.URL.Path, "/img/")
 	if imgPath == "" {
 		http.Error(w, "image path required", http.StatusBadRequest)
@@ -391,24 +391,27 @@ func (h *Handler) proxyImage(w http.ResponseWriter, r *http.Request) {
 		size = "400"
 	}
 
-	// 拼接实际文件路径: imgBase/4b/17/xxx.webp.400.0.-1
-	fullPath := filepath.Join(h.imgBase, imgPath+"."+size+".0.-1")
+	// 尝试顺序：带 size 后缀 → 不带后缀
+	tryPaths := []string{
+		filepath.Join(h.imgBase, imgPath+"."+size+".0.-1"),
+		filepath.Join(h.imgBase, imgPath),
+	}
 
-	file, err := os.Open(fullPath)
-	if err != nil {
-		// 回退尝试不带 size 后缀的原始文件
-		fullPath = filepath.Join(h.imgBase, imgPath)
-		file, err = os.Open(fullPath)
-		if err != nil {
-			if os.IsNotExist(err) {
-				http.Error(w, "image not found", http.StatusNotFound)
-			} else {
-				http.Error(w, "open error", http.StatusInternalServerError)
-			}
-			return
+	var fullPath string
+	var file *os.File
+	for _, p := range tryPaths {
+		f, err := os.Open(p)
+		if err == nil {
+			fullPath = p
+			file = f
+			defer file.Close()
+			break
 		}
 	}
-	defer file.Close()
+	if fullPath == "" {
+		http.Error(w, "image not found", http.StatusNotFound)
+		return
+	}
 
 	stat, err := file.Stat()
 	if err != nil {
