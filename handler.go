@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -23,7 +24,28 @@ func RegisterRoutes(mux *http.ServeMux, h *Handler) {
 	mux.HandleFunc("/api/health", h.health)
 	mux.HandleFunc("/api/files/delete", h.deleteFiles)
 	mux.HandleFunc("/api/nfo/", h.findNFO)
+	mux.HandleFunc("/api/media/", h.routeMedia)
+	mux.HandleFunc("/api/decode-config", h.decodeConfig)
 	mux.HandleFunc("/img/", h.proxyImage)
+}
+
+// StreamInfo describes a single media stream (video/audio/subtitle track)
+type StreamInfo struct {
+	Type       string `json:"type"`
+	Codec      string `json:"codec"`
+	Language   string `json:"language,omitempty"`
+	Width      int    `json:"width,omitempty"`
+	Height     int    `json:"height,omitempty"`
+	Bitrate    int    `json:"bitrate,omitempty"`
+	Channels   int    `json:"channels,omitempty"`
+	SampleRate string `json:"sample_rate,omitempty"`
+	IsDefault  bool   `json:"is_default"`
+	Forced     bool   `json:"forced"`
+	External   bool   `json:"is_external"`
+	Profile    string `json:"profile,omitempty"`
+	PixFmt     string `json:"pix_fmt,omitempty"`
+	Duration   int    `json:"duration,omitempty"`
+	Index      int    `json:"index"`
 }
 
 func (h *Handler) health(w http.ResponseWriter, r *http.Request) {
@@ -429,6 +451,474 @@ func (h *Handler) proxyImage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", stat.Size()))
 	w.Header().Set("Cache-Control", "public, max-age=604800")
 	io.Copy(w, file)
+}
+
+// routeMedia handles /api/media/{media_guid}[/stream|/play-info] routes
+func (h *Handler) routeMedia(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/media/")
+	if path == "" {
+		jsonError(w, "media_guid required", http.StatusBadRequest)
+		return
+	}
+
+	parts := strings.SplitN(path, "/", 2)
+	mediaGuid := parts[0]
+
+	if len(parts) == 2 {
+		switch parts[1] {
+		case "stream":
+			h.streamMedia(w, r, mediaGuid)
+			return
+		case "play-info":
+			h.playInfo(w, r, mediaGuid)
+			return
+		}
+	}
+
+	h.mediaInfo(w, r, mediaGuid)
+}
+
+// mediaInfo returns media file info + streams + decode config for a media_guid
+func (h *Handler) mediaInfo(w http.ResponseWriter, r *http.Request, mediaGuid string) {
+	db, err := h.dbm.getDB("trimmedia.db")
+	if err != nil {
+		jsonError(w, "database error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// 1. Get media file info from item_media
+	var path, dir string
+	var size int64
+	var canPlay int
+	err = db.QueryRow(
+		"SELECT path, dir, size, can_play FROM item_media WHERE guid = ?", mediaGuid,
+	).Scan(&path, &dir, &size, &canPlay)
+	if err != nil {
+		jsonError(w, "media not found: "+err.Error(), http.StatusNotFound)
+		return
+	}
+
+	// Check file exists
+	fileExists := false
+	if info, err := os.Stat(path); err == nil {
+		fileExists = true
+		if size == 0 {
+			size = info.Size()
+		}
+	}
+
+	// 2. Get all streams (video/audio/subtitle)
+	rows, err := db.Query(`
+		SELECT codec_type, codec_name, language, width, height, bps,
+		       channels, sample_rate, is_default, forced, is_external,
+		       profile, pix_fmt, duration, index
+		FROM media_stream WHERE media_guid = ? ORDER BY codec_type, index
+	`, mediaGuid)
+	if err != nil {
+		jsonError(w, "stream query error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var streams []StreamInfo
+	for rows.Next() {
+		var s StreamInfo
+		var lang, sampleRate, profile, pixFmt string
+		var width, height, bps, channels, duration, idx int
+		var isDefault, forced, isExternal int
+
+		if err := rows.Scan(&s.Type, &s.Codec, &lang, &width, &height, &bps,
+			&channels, &sampleRate, &isDefault, &forced, &isExternal,
+			&profile, &pixFmt, &duration, &idx); err != nil {
+			continue
+		}
+		s.Language = lang
+		s.Width = width
+		s.Height = height
+		s.Bitrate = bps
+		s.Channels = channels
+		s.SampleRate = sampleRate
+		s.IsDefault = isDefault == 1
+		s.Forced = forced == 1
+		s.External = isExternal == 1
+		s.Profile = profile
+		s.PixFmt = pixFmt
+		s.Duration = duration
+		s.Index = idx
+		streams = append(streams, s)
+	}
+
+	// 3. Get direct_link config from media_server
+	var directLinkEnable, directLinkLevel int
+	var directLinkDrives string
+	_ = db.QueryRow(
+		"SELECT direct_link_enable, direct_link_allowed_level, direct_link_allowed_drives FROM media_server LIMIT 1",
+	).Scan(&directLinkEnable, &directLinkLevel, &directLinkDrives)
+
+	// 4. Get decode/transcode config from sys_metadata (filtered by keywords)
+	decodeKeys := []string{
+		"transcode%", "hw_%", "gpu_%", "vaapi%", "qsv%", "nvenc%",
+		"cuda%", "ffmpeg%", "decoder%", "encoder%", "hardware%",
+		"accel%", "video_codecs", "audio_codecs", "mediasrv_%",
+	}
+	decodeConfig := make(map[string]string)
+	for _, pattern := range decodeKeys {
+		krows, err := db.Query("SELECT key, value FROM sys_metadata WHERE key LIKE ? AND private != 1", pattern)
+		if err != nil {
+			continue
+		}
+		for krows.Next() {
+			var k, v string
+			if err := krows.Scan(&k, &v); err == nil {
+				decodeConfig[k] = v
+			}
+		}
+		krows.Close()
+	}
+
+	// 5. Build response
+	result := map[string]interface{}{
+		"media_guid":  mediaGuid,
+		"file_path":   path,
+		"dir":         dir,
+		"size":        size,
+		"size_human":  humanizeBytes(size),
+		"can_play":    canPlay == 1,
+		"file_exists": fileExists,
+		"streams":     streams,
+		"direct_link": map[string]interface{}{
+			"enabled":        directLinkEnable == 1,
+			"allowed_level":  directLinkLevel,
+			"allowed_drives": directLinkDrives,
+		},
+		"decode_config": decodeConfig,
+	}
+
+	// 6. Get item info (title, type) if available
+	var itemTitle, itemType string
+	_ = db.QueryRow(
+		"SELECT i.title, i.type FROM item_media im JOIN item i ON im.item_guid = i.guid WHERE im.guid = ?",
+		mediaGuid,
+	).Scan(&itemTitle, &itemType)
+	result["item_title"] = itemTitle
+	result["item_type"] = itemType
+
+	jsonOK(w, result)
+}
+
+// streamMedia serves the media file. Supports mode=direct (default) and mode=transcode.
+// mode=direct  → http.ServeFile, supports Range/seek, client decodes
+// mode=transcode → FFmpeg pipe, fragmented MP4, server decodes+encodes
+// mode=auto → server decides based on codec compatibility
+func (h *Handler) streamMedia(w http.ResponseWriter, r *http.Request, mediaGuid string) {
+	db, err := h.dbm.getDB("trimmedia.db")
+	if err != nil {
+		jsonError(w, "database error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	var filePath string
+	err = db.QueryRow("SELECT path FROM item_media WHERE guid = ?", mediaGuid).Scan(&filePath)
+	if err != nil {
+		jsonError(w, "media not found", http.StatusNotFound)
+		return
+	}
+
+	if filePath == "" {
+		jsonError(w, "empty file path", http.StatusNotFound)
+		return
+	}
+
+	info, err := os.Stat(filePath)
+	if err != nil {
+		jsonError(w, "file not found: "+filePath, http.StatusNotFound)
+		return
+	}
+
+	if info.IsDir() {
+		jsonError(w, "path is a directory", http.StatusBadRequest)
+		return
+	}
+
+	// Parse mode parameter
+	mode := r.URL.Query().Get("mode")
+	if mode == "" {
+		mode = "direct"
+	}
+
+	switch mode {
+	case "direct":
+		// Direct file serving: client handles decoding
+		log.Printf("streaming direct %s (%s) for %s", filePath, humanizeBytes(info.Size()), mediaGuid)
+		http.ServeFile(w, r, filePath)
+
+	case "transcode":
+		// FFmpeg transcoding: server decodes + re-encodes
+		params := TranscodeParams{
+			Mode:          "transcode",
+			TargetVCodec:  r.URL.Query().Get("vcodec"),
+			TargetACodec:  r.URL.Query().Get("acodec"),
+			TargetBitrate: parseIntDefault(r.URL.Query().Get("bitrate"), 0),
+			TargetHeight:  parseIntDefault(r.URL.Query().Get("height"), 0),
+			StartTime:     r.URL.Query().Get("start"),
+			Duration:      r.URL.Query().Get("duration"),
+		}
+		transcodeStream(w, r, filePath, params)
+
+	case "auto":
+		// Server decides: check codec compatibility
+		streams := h.getMediaStreams(db, mediaGuid)
+		cfg := getTranscoderConfig()
+		recommendedMode, reason := recommendPlayMode(streams, cfg.GPUType)
+		log.Printf("auto mode: %s (%s) for %s", recommendedMode, reason, mediaGuid)
+
+		if recommendedMode == "transcode" {
+			params := TranscodeParams{
+				Mode:         "transcode",
+				TargetVCodec: "h264",
+				TargetACodec: "aac",
+			}
+			transcodeStream(w, r, filePath, params)
+		} else {
+			http.ServeFile(w, r, filePath)
+		}
+
+	default:
+		jsonError(w, "invalid mode: "+mode+" (use direct, transcode, or auto)", http.StatusBadRequest)
+	}
+}
+
+// decodeConfig returns all sys_metadata entries related to transcoding/decoding
+func (h *Handler) decodeConfig(w http.ResponseWriter, r *http.Request) {
+	db, err := h.dbm.getDB("trimmedia.db")
+	if err != nil {
+		jsonError(w, "database error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Return ALL non-private sys_metadata keys (broad search)
+	rows, err := db.Query("SELECT key, value FROM sys_metadata WHERE private != 1 ORDER BY key")
+	if err != nil {
+		jsonError(w, "query error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	config := make(map[string]string)
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err == nil {
+			config[k] = v
+		}
+	}
+
+	// Also get media_server direct_link config
+	var name string
+	var directLinkEnable, directLinkLevel int
+	var directLinkDrives string
+	_ = db.QueryRow(
+		"SELECT name, direct_link_enable, direct_link_allowed_level, direct_link_allowed_drives FROM media_server LIMIT 1",
+	).Scan(&name, &directLinkEnable, &directLinkLevel, &directLinkDrives)
+
+	// Check for GPU device files
+	gpuDevices := checkGPUDevices()
+
+	jsonOK(w, map[string]interface{}{
+		"sys_metadata":   config,
+		"media_server": map[string]interface{}{
+			"name":              name,
+			"direct_link_enable": directLinkEnable == 1,
+			"direct_link_level":  directLinkLevel,
+			"direct_link_drives": directLinkDrives,
+		},
+		"gpu_devices": gpuDevices,
+	})
+}
+
+// checkGPUDevices checks for common GPU device files on the system
+func checkGPUDevices() map[string]interface{} {
+	result := make(map[string]interface{})
+
+	// Intel VAAPI (QuickSync): /dev/dri/renderD128
+	if _, err := os.Stat("/dev/dri/renderD128"); err == nil {
+		result["vaapi_device"] = "/dev/dri/renderD128"
+		result["intel_qsv"] = true
+	}
+	// Intel i915 driver check
+	if _, err := os.Stat("/dev/dri/card0"); err == nil {
+		result["drm_card0"] = true
+	}
+	// NVIDIA: /dev/nvidia0
+	if _, err := os.Stat("/dev/nvidia0"); err == nil {
+		result["nvidia"] = true
+	}
+	// NVIDIA NVENC
+	if _, err := os.Stat("/dev/nvidiactl"); err == nil {
+		result["nvidia_ctl"] = true
+	}
+
+	return result
+}
+
+func humanizeBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
+// playInfo returns the recommended playback strategy for a media file.
+// Frontend calls this first, then uses the result to choose mode=direct or mode=transcode.
+func (h *Handler) playInfo(w http.ResponseWriter, r *http.Request, mediaGuid string) {
+	db, err := h.dbm.getDB("trimmedia.db")
+	if err != nil {
+		jsonError(w, "database error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// 1. Get media file info
+	var path, dir string
+	var size int64
+	var canPlay int
+	err = db.QueryRow(
+		"SELECT path, dir, size, can_play FROM item_media WHERE guid = ?", mediaGuid,
+	).Scan(&path, &dir, &size, &canPlay)
+	if err != nil {
+		jsonError(w, "media not found: "+err.Error(), http.StatusNotFound)
+		return
+	}
+
+	fileExists := false
+	if info, err := os.Stat(path); err == nil {
+		fileExists = true
+		if size == 0 {
+			size = info.Size()
+		}
+	}
+
+	// 2. Get streams
+	streams := h.getMediaStreams(db, mediaGuid)
+
+	// 3. Get transcoder config
+	cfg := getTranscoderConfig()
+
+	// 4. Check codec compatibility
+	compat := checkCodecCompatibility(streams)
+
+	// 5. Get recommended mode
+	recommendedMode, reason := recommendPlayMode(streams, cfg.GPUType)
+
+	// 6. Get item title
+	var itemTitle, itemType string
+	_ = db.QueryRow(
+		"SELECT i.title, i.type FROM item_media im JOIN item i ON im.item_guid = i.guid WHERE im.guid = ?",
+		mediaGuid,
+	).Scan(&itemTitle, &itemType)
+
+	// 7. Build stream URLs
+	baseURL := fmt.Sprintf("http://%s/api/media/%s", r.Host, mediaGuid)
+
+	jsonOK(w, map[string]interface{}{
+		"media_guid":   mediaGuid,
+		"item_title":   itemTitle,
+		"item_type":    itemType,
+		"file_path":    path,
+		"size":         size,
+		"size_human":   humanizeBytes(size),
+		"file_exists":  fileExists,
+		"streams":      streams,
+
+		// Playback strategy
+		"recommended_mode": recommendedMode,
+		"reason":           reason,
+
+		// Codec compatibility matrix
+		"codec_compatibility": map[string]interface{}{
+			"browser_safe":    compat.BrowserSafe,
+			"mobile_safe":     compat.MobileSafe,
+			"desktop_safe":     compat.DesktopSafe,
+			"need_transcode":  compat.NeedTranscode,
+			"detail":          compat.Reason,
+		},
+
+		// Transcoder capability
+		"transcoder": map[string]interface{}{
+			"ffmpeg_path":   cfg.FFmpegPath,
+			"gpu_type":      cfg.GPUType,
+			"gpu_device":    cfg.GPUDevice,
+			"max_cpu_threads": cfg.MaxThreads,
+		},
+
+		// Available stream URLs
+		"stream_urls": map[string]interface{}{
+			"direct":      baseURL + "/stream?mode=direct",
+			"transcode":   baseURL + "/stream?mode=transcode",
+			"auto":        baseURL + "/stream?mode=auto",
+			"transcode_custom": fmt.Sprintf("%s/stream?mode=transcode&vcodec=h264&acodec=aac&bitrate=4000&height=1080", baseURL),
+		},
+	})
+}
+
+// getMediaStreams queries media_stream table for a given media_guid
+func (h *Handler) getMediaStreams(db *sql.DB, mediaGuid string) []StreamInfo {
+	rows, err := db.Query(`
+		SELECT codec_type, codec_name, language, width, height, bps,
+		       channels, sample_rate, is_default, forced, is_external,
+		       profile, pix_fmt, duration, index
+		FROM media_stream WHERE media_guid = ? ORDER BY codec_type, index
+	`, mediaGuid)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var streams []StreamInfo
+	for rows.Next() {
+		var s StreamInfo
+		var lang, sampleRate, profile, pixFmt string
+		var width, height, bps, channels, duration, idx int
+		var isDefault, forced, isExternal int
+
+		if err := rows.Scan(&s.Type, &s.Codec, &lang, &width, &height, &bps,
+			&channels, &sampleRate, &isDefault, &forced, &isExternal,
+			&profile, &pixFmt, &duration, &idx); err != nil {
+			continue
+		}
+		s.Language = lang
+		s.Width = width
+		s.Height = height
+		s.Bitrate = bps
+		s.Channels = channels
+		s.SampleRate = sampleRate
+		s.IsDefault = isDefault == 1
+		s.Forced = forced == 1
+		s.External = isExternal == 1
+		s.Profile = profile
+		s.PixFmt = pixFmt
+		s.Duration = duration
+		s.Index = idx
+		streams = append(streams, s)
+	}
+	return streams
+}
+
+// parseIntDefault parses an integer from a string, returning def on error
+func parseIntDefault(s string, def int) int {
+	if s == "" {
+		return def
+	}
+	var v int
+	_, err := fmt.Sscanf(s, "%d", &v)
+	if err != nil {
+		return def
+	}
+	return v
 }
 
 func jsonOK(w http.ResponseWriter, data interface{}) {

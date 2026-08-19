@@ -55,6 +55,60 @@ bash install.sh uninstall  # 卸载
 | POST | `/api/db/{dbname}/table/{table}` | 插入数据 |
 | PUT | `/api/db/{dbname}/table/{table}` | 更新数据 |
 | DELETE | `/api/db/{dbname}/table/{table}` | 删除数据 |
+| POST | `/api/files/delete` | 批量删除文件 |
+| GET | `/api/nfo/{item_guid}` | 搜索 NFO 元数据文件 |
+| GET | `/api/media/{media_guid}` | 查询媒体文件信息 (路径/编码/流轨道) |
+| GET | `/api/media/{media_guid}/play-info` | 获取播放策略推荐 (编码兼容性+GPU+推荐模式) |
+| GET | `/api/media/{media_guid}/stream` | 流式返回媒体文件 (mode=direct/transcode/auto) |
+| GET | `/api/decode-config` | 查询飞牛解码配置和 GPU 设备探测 |
+| GET | `/img/{path}` | 代理返回影片图片 |
+
+## 关于流媒体播放
+
+本服务部署在飞牛 NAS 上，支持三种播放模式，前端通过 `mode` 参数选择。
+
+### 播放模式
+
+| mode | 说明 | 适用场景 |
+|------|------|----------|
+| `direct` (默认) | 原始文件直传，支持 Range/seek | 源编码兼容客户端，局域网 |
+| `transcode` | FFmpeg 转码，输出 fragmented MP4 | 浏览器播放不兼容编码 (HEVC/DTS) |
+| `auto` | 服务端自动判断 | 最省心 |
+
+### 推荐的前端接入流程
+
+```
+1. GET /api/media/{guid}/play-info  → 获取推荐模式 + 编码兼容性 + GPU 状态
+2. 根据 recommended_mode 选择:
+   ├─ "direct"    → /api/media/{guid}/stream?mode=direct
+   └─ "transcode" → /api/media/{guid}/stream?mode=transcode&bitrate=4000&height=1080
+3. 或直接用 ?mode=auto 让服务端自动判断
+```
+
+### GPU 硬件加速
+
+转码引擎自动探测 GPU 设备，与飞牛系统配置一致：
+
+| GPU 类型 | 设备 | FFmpeg 编码器 | 说明 |
+|----------|------|---------------|------|
+| Intel VAAPI | `/dev/dri/renderD128` | `h264_vaapi` | QuickSync 硬件转码 |
+| NVIDIA | `/dev/nvidia0` | `h264_nvenc` | NVENC 硬件转码 |
+| CPU (无 GPU) | - | `libx264` | 软件转码，限制并发 |
+
+无 GPU 时 `play-info` 会推荐 `direct` 模式 (客户端解码)。
+
+### 客户端播放器建议
+
+| 播放器 | 软解 | 硬解 | 适用场景 |
+|--------|------|------|----------|
+| mpv | 支持 | 支持 | 全平台, 兼容性最好 |
+| VLC | 支持 | 支持 | 全平台 |
+| IINA | 支持 | 支持 | macOS (基于 mpv) |
+| Infuse | 支持 | 支持 | iOS/tvOS |
+| PotPlayer | 支持 | 支持 | Windows |
+| HTML5 video | - | - | 需 mode=transcode 转码为 H.264+AAC |
+
+详见 [docs/api.md](docs/api.md) 第 10-13 节。
 
 ### 示例
 
@@ -90,3 +144,5 @@ curl -X POST http://10.0.0.4:8877/api/db/trimmedia.db/query \
 | v0.1.2 | 修复 SQL 自带 LIMIT 时的分页冲突 |
 | v0.1.3 | 添加 API 接口文档 |
 | v0.1.4 | 添加 install.sh 安装脚本 |
+| v0.1.5 | 添加 NFO 搜索、图片代理、批量文件删除接口；补充流媒体架构说明 |
+| v0.1.6 | 添加 play-info 推荐接口；stream 支持 mode=direct/transcode/auto；FFmpeg 转码引擎 (GPU 硬件加速) |
